@@ -1,0 +1,344 @@
+name: "CI / CD"
+
+on:
+  workflow_call:
+    inputs:
+      docker-registry:
+        description: "Docker registry"
+        required: false
+        default: "europe-west4-docker.pkg.dev"
+        type: "string"
+      docker-project-id:
+        description: "Docker project id"
+        required: false
+        default: "rtbhouse-apps"
+        type: "string"
+      docker-repository-id:
+        description: "Docker repository id"
+        required: true
+        type: "string"
+      docker-image-name:
+        description: "Docker image name"
+        required: true
+        type: "string"
+      context-dir:
+        description: "Component context dir"
+        required: false
+        default: "."
+        type: "string"
+      component:
+        description: "Component name"
+        required: false
+        default: "jobs"
+        type: "string"
+      test-service-account:
+        description: "GCP Service account to use for CI tests"
+        required: false
+        type: "string"
+
+defaults:
+  run:
+    shell: "bash"
+
+jobs:
+  prepare:
+    name: "Prepare"
+    runs-on: "ubuntu-latest"
+    outputs:
+      actions-service-account: "github-actions@rtbhouse-apps.iam.gserviceaccount.com"
+      docker-image: "${{ inputs.docker-registry }}/${{ inputs.docker-project-id }}/${{ inputs.docker-repository-id }}/${{ inputs.docker-image-name }}"
+      branch-sha-docker-tag: "${{ steps.set-variables.outputs.branch-sha-docker-tag }}"
+      sha-docker-tag: "${{ steps.set-variables.outputs.sha-docker-tag }}"
+      dev-docker-tag: "${{ steps.set-variables.outputs.dev-docker-tag }}"
+      sha-short: "${{ steps.set-variables.outputs.sha-short }}"
+      should-perform-ci-job: "${{ steps.should-perform-ci-job.outputs.should-perform-ci-job }}"
+
+    steps:
+      - name: "Checkout"
+        uses: "actions/checkout@v2"
+
+      - name: "Should perform CI job"
+        id: "should-perform-ci-job"
+        run: |
+          if [[
+            -f ${{ inputs.context-dir }}/bin/lint_ci.sh
+            || -f ${{ inputs.context-dir }}/bin/lint.sh
+            || -f ${{ inputs.context-dir }}/bin/test_ci.sh
+            || -f ${{ inputs.context-dir }}/bin/test.sh
+          ]]; then
+            echo "::set-output name=should-perform-ci-job::1"
+          fi
+
+      - name: "Set variables"
+        id: "set-variables"
+        uses: "actions/github-script@v5"
+        with:
+          script: |
+            const devTagPrefix = "dev-";
+            const shaShort = context.sha.substring(0, 7);
+            const shaDockerTag = "sha-" + shaShort;
+            const branchShaDockerTag = (()=> {
+              if (!/^refs\/heads\//.test(context.ref)) {
+                return shaDockerTag;
+              } else {
+                const sanitizedBranch = context.ref.replace(/^refs\/heads\//g, '').replace(/[^a-zA-Z0-9._-]+/g, '-');
+                const shaSuffix = "-" + shaDockerTag;
+                return sanitizedBranch.substring(0, 128 - shaSuffix.length) + shaSuffix;
+              }
+            })();
+
+            core.setOutput("sha-short", shaShort);
+            core.setOutput("sha-docker-tag", shaDockerTag);
+            core.setOutput("branch-sha-docker-tag", branchShaDockerTag);
+            core.setOutput("dev-docker-tag", devTagPrefix + shaDockerTag)
+
+  build-docker-image:
+    name: "Build docker image"
+    runs-on: "ubuntu-latest"
+    needs: "prepare"
+
+    permissions:
+      contents: "read"
+      id-token: "write"
+
+    steps:
+      - name: "Checkout"
+        uses: "actions/checkout@v2"
+
+      - name: "Authenticate to Google Cloud"
+        id: "gcp-auth"
+        uses: "google-github-actions/auth@v0"
+        with:
+          token_format: "access_token"
+          workload_identity_provider: "projects/716804851657/locations/global/workloadIdentityPools/github-actions-identity-pool/providers/github-identity-pool-provider"
+          service_account: "${{ needs.prepare.outputs.actions-service-account }}"
+          create_credentials_file: false
+
+      - name: "Login to Docker Registry"
+        uses: "docker/login-action@v1"
+        with:
+          registry: "${{ inputs.docker-registry }}"
+          username: "oauth2accesstoken"
+          password: "${{ steps.gcp-auth.outputs.access_token }}"
+
+      - name: "Set docker image metadata"
+        id: "docker-metadata"
+        uses: "docker/metadata-action@v3"
+        with:
+          images: |
+            ${{ needs.prepare.outputs.docker-image }}
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.sha-docker-tag }}
+      
+      - name: "Set docker image metadata (branch)"
+        id: "docker-branch-metadata"
+        uses: "docker/metadata-action@v3"
+        with:
+          images: |
+            ${{ needs.prepare.outputs.docker-image }}
+          tags: |
+            type=ref,event=branch
+            type=raw,value=${{ needs.prepare.outputs.branch-sha-docker-tag }}
+        if: format('refs/heads/{0}', github.event.repository.default_branch) != github.ref
+
+      - name: "Set up Docker Buildx"
+        uses: "docker/setup-buildx-action@v1"
+
+      - name: "Add uid and gid env vars"
+        id: "set-uid-gid"
+        run: |
+          echo "::set-output name=uid::`id -u`"
+          echo "::set-output name=gid::`id -g`"
+
+      - name: "Build Docker image"
+        uses: "docker/build-push-action@v2"
+        with:
+          context: "${{ inputs.context-dir }}"
+          build-args: |
+            UID=${{ steps.set-uid-gid.outputs.uid }}
+            GID=${{ steps.set-uid-gid.outputs.gid }}
+            VERSION=${{ needs.prepare.outputs.sha-short }}
+          target: "prod"
+          push: true
+          tags: |
+            ${{ steps.docker-metadata.outputs.tags }}
+            ${{ steps.docker-branch-metadata.outputs.tags }}
+          labels: |
+            ${{ steps.docker-metadata.outputs.labels }}
+            ${{ steps.docker-branch-metadata.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  ci:
+    name: "Continuous integration"
+    runs-on: "self-hosted"
+    needs: ["prepare", "build-docker-image"]
+    if: needs.prepare.outputs.should-perform-ci-job
+    env:
+      DOCKER_TAG: "${{ needs.prepare.outputs.dev-docker-tag }}"
+
+    permissions:
+      contents: "read"
+      id-token: "write"
+
+    steps:
+      - name: "Checkout"
+        uses: "actions/checkout@v2"
+
+      - name: "Prepare"
+        id: "prepare"
+        run: |
+          if [ -f ${{ inputs.context-dir }}/bin/install_ci.sh ]; then
+            echo "::set-output name=install-script::${{ inputs.context-dir }}/bin/install_ci.sh"
+          elif [ -f ${{ inputs.context-dir }}/bin/install.sh ]; then
+            echo "::set-output name=install-script::${{ inputs.context-dir }}/bin/install.sh"
+          fi
+
+          if [ -f ${{ inputs.context-dir }}/bin/get_config_ci.sh ]; then
+            echo "::set-output name=get-config-script::${{ inputs.context-dir }}/bin/get_config_ci.sh"
+          elif [ -f ${{ inputs.context-dir }}/bin/get_config.sh ]; then
+            echo "::set-output name=get-config-script::${{ inputs.context-dir }}/bin/get_config.sh"
+          fi
+
+          if [ -f ${{ inputs.context-dir }}/bin/lint_ci.sh ]; then
+            echo "::set-output name=lint-script::${{ inputs.context-dir }}/bin/lint_ci.sh"
+          elif [ -f ${{ inputs.context-dir }}/bin/lint.sh ]; then
+            echo "::set-output name=lint-script::${{ inputs.context-dir }}/bin/lint.sh"
+          fi
+
+          if [ -f ${{ inputs.context-dir }}/bin/test_ci.sh ]; then
+            echo "::set-output name=test-script::${{ inputs.context-dir }}/bin/test_ci.sh"
+          elif [ -f ${{ inputs.context-dir }}/bin/test.sh ]; then
+            echo "::set-output name=test-script::${{ inputs.context-dir }}/bin/test.sh"
+          fi
+
+      - name: "Authenticate to Google Cloud"
+        id: "gcp-auth"
+        uses: "google-github-actions/auth@v0"
+        with:
+          token_format: "access_token"
+          workload_identity_provider: "projects/716804851657/locations/global/workloadIdentityPools/github-actions-identity-pool/providers/github-identity-pool-provider"
+          service_account: "${{ needs.prepare.outputs.actions-service-account }}"
+          create_credentials_file: true
+
+      - name: "Login to Docker Registry"
+        id: "docker-login"
+        uses: "docker/login-action@v1"
+        with:
+          registry: "${{ inputs.docker-registry }}"
+          username: "oauth2accesstoken"
+          password: "${{ steps.gcp-auth.outputs.access_token }}"
+
+      - name: "Set docker image metadata"
+        id: "docker-metadata"
+        uses: "docker/metadata-action@v3"
+        with:
+          images: |
+            ${{ needs.prepare.outputs.docker-image }}
+          tags: |
+            type=raw,value=${{ env.DOCKER_TAG }}
+
+      - name: "Set up Docker Buildx"
+        uses: "docker/setup-buildx-action@v1"
+
+      - name: "Add uid and gid env vars"
+        id: "set-uid-gid"
+        run: |
+          echo "::set-output name=uid::`id -u`"
+          echo "::set-output name=gid::`id -g`"
+
+      - name: "Build dev Docker image"
+        uses: "docker/build-push-action@v2"
+        with:
+          context: "${{ inputs.context-dir }}"
+          build-args: |
+            UID=${{ steps.set-uid-gid.outputs.uid }}
+            GID=${{ steps.set-uid-gid.outputs.gid }}
+          target: "dev"
+          push: false
+          load: true
+          tags: "${{ steps.docker-metadata.outputs.tags }}"
+          labels: "${{ steps.docker-metadata.outputs.labels }}"
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: "Install"
+        id: "install"
+        run: |
+          ${{ steps.prepare.outputs.install-script }}
+        if: "steps.prepare.outputs.install-script"
+
+      - name: "Get CI config"
+        id: "get-config"
+        run: |
+          ${{ steps.prepare.outputs.get-config-script }}
+        if: "steps.prepare.outputs.get-config-script"
+
+      - name: "Lint"
+        id: "lint"
+        run: |
+          ${{ steps.prepare.outputs.lint-script }}
+        if: >
+          always()
+          && steps.prepare.outputs.lint-script
+
+      - name: "Authenticate to Google Cloud with test Service Account"
+        id: "gcp-auth-test-sa"
+        uses: "google-github-actions/auth@v0"
+        with:
+          workload_identity_provider: "projects/716804851657/locations/global/workloadIdentityPools/github-actions-identity-pool/providers/github-identity-pool-provider"
+          service_account: "${{ inputs.test-service-account }}"
+          create_credentials_file: true
+        if: >
+          always()
+          && inputs.test-service-account
+
+      - name: "Test"
+        id: "test"
+        run: |
+          ${{ steps.prepare.outputs.test-script }}
+        if: >
+          always()
+          && steps.prepare.outputs.test-script
+      
+      - name: "Cleanup"
+        id: "cleanup"
+        run: |
+          docker compose down --remove-orphans
+        if: always()
+
+  release-production-docker-tag:
+    name: "Release production docker tag"
+    runs-on: "ubuntu-latest"
+    needs: ["prepare", "ci"]
+    if: format('refs/heads/{0}', github.event.repository.default_branch) == github.ref
+
+    permissions:
+      contents: "read"
+      id-token: "write"
+
+    steps:
+      - name: "Authenticate to Google Cloud"
+        id: "gcp-auth"
+        uses: "google-github-actions/auth@v0"
+        with:
+          workload_identity_provider: "projects/716804851657/locations/global/workloadIdentityPools/github-actions-identity-pool/providers/github-identity-pool-provider"
+          service_account: "${{ needs.prepare.outputs.actions-service-account }}"
+      
+      - name: "Set up Cloud SDK"
+        uses: "google-github-actions/setup-gcloud@v0"
+        
+      - name: "Set docker image metadata (branch)"
+        id: "docker-branch-metadata"
+        uses: "docker/metadata-action@v3"
+        with:
+          images: |
+            ${{ needs.prepare.outputs.docker-image }}
+          tags: |
+            type=ref,event=branch
+            type=raw,value=${{ needs.prepare.outputs.branch-sha-docker-tag }}
+      
+      - name: "Set production docker tags"
+        run: |
+          echo "${{ steps.docker-branch-metadata.outputs.tags }}" | 
+            xargs -i gcloud artifacts docker tags add ${{ needs.prepare.outputs.docker-image }}:${{ needs.prepare.outputs.sha-docker-tag }} '{}'
