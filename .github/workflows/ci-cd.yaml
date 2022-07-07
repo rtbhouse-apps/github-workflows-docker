@@ -71,7 +71,7 @@ jobs:
 
       - name: "Set variables"
         id: "set-variables"
-        uses: "actions/github-script@v5"
+        uses: "actions/github-script@v6"
         with:
           script: |
             const devTagPrefix = "dev-";
