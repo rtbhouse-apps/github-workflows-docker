@@ -123,7 +123,7 @@ jobs:
 
       - name: "Set docker image metadata"
         id: "docker-metadata"
-        uses: "docker/metadata-action@v3"
+        uses: "docker/metadata-action@v4"
         with:
           images: |
             ${{ needs.prepare.outputs.docker-image }}
@@ -132,7 +132,7 @@ jobs:
       
       - name: "Set docker image metadata (branch)"
         id: "docker-branch-metadata"
-        uses: "docker/metadata-action@v3"
+        uses: "docker/metadata-action@v4"
         with:
           images: |
             ${{ needs.prepare.outputs.docker-image }}
@@ -231,7 +231,7 @@ jobs:
 
       - name: "Set docker image metadata"
         id: "docker-metadata"
-        uses: "docker/metadata-action@v3"
+        uses: "docker/metadata-action@v4"
         with:
           images: |
             ${{ needs.prepare.outputs.docker-image }}
@@ -330,7 +330,7 @@ jobs:
         
       - name: "Set docker image metadata (branch)"
         id: "docker-branch-metadata"
-        uses: "docker/metadata-action@v3"
+        uses: "docker/metadata-action@v4"
         with:
           images: |
             ${{ needs.prepare.outputs.docker-image }}
