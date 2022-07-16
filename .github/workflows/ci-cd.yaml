@@ -115,7 +115,7 @@ jobs:
           create_credentials_file: false
 
       - name: "Login to Docker Registry"
-        uses: "docker/login-action@v1"
+        uses: "docker/login-action@v2"
         with:
           registry: "${{ inputs.docker-registry }}"
           username: "oauth2accesstoken"
@@ -223,7 +223,7 @@ jobs:
 
       - name: "Login to Docker Registry"
         id: "docker-login"
-        uses: "docker/login-action@v1"
+        uses: "docker/login-action@v2"
         with:
           registry: "${{ inputs.docker-registry }}"
           username: "oauth2accesstoken"
