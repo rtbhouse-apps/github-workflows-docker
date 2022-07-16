@@ -55,7 +55,7 @@ jobs:
 
     steps:
       - name: "Checkout"
-        uses: "actions/checkout@v2"
+        uses: "actions/checkout@v3"
 
       - name: "Should perform CI job"
         id: "should-perform-ci-job"
@@ -103,7 +103,7 @@ jobs:
 
     steps:
       - name: "Checkout"
-        uses: "actions/checkout@v2"
+        uses: "actions/checkout@v3"
 
       - name: "Authenticate to Google Cloud"
         id: "gcp-auth"
@@ -183,7 +183,7 @@ jobs:
 
     steps:
       - name: "Checkout"
-        uses: "actions/checkout@v2"
+        uses: "actions/checkout@v3"
 
       - name: "Prepare"
         id: "prepare"
